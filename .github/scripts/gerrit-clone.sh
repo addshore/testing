@@ -12,7 +12,7 @@ for mode in default explicit; do
     cd "$root/$mode"
     unset GIT_HTTP_USER_AGENT
     if [ "$mode" = explicit ]; then
-        export GIT_HTTP_USER_AGENT='mwcli-clone-diagnostic/1.0 (https://github.com/addshore/testing)'
+        export GIT_HTTP_USER_AGENT='mwcli/dev (https://www.mediawiki.org/wiki/Cli)'
     fi
     printf 'User-agent mode: %s\n' "$mode"
 for repository in Wikibase ParserFunctions; do
