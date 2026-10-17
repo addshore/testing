@@ -13,7 +13,6 @@ jobs:
       fail-fast: false
       matrix:
         environment: [ubuntu, docker]
-        user-agent: [default, explicit]
     permissions:
       contents: read
     steps:
@@ -23,14 +22,12 @@ jobs:
       - name: Clone Wikibase and ParserFunctions from Gerrit
         env:
           CLONE_ENVIRONMENT: ${{ matrix.environment }}
-          CLONE_USER_AGENT: ${{ matrix.user-agent }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/gerrit-clone"
           if [ "$CLONE_ENVIRONMENT" = docker ]; then
             docker run --rm \
-              -e CLONE_USER_AGENT \
               -v "$GITHUB_WORKSPACE/.github/scripts/gerrit-clone.sh:/diagnostic.sh:ro" \
               -v "$RUNNER_TEMP/gerrit-clone:/results" \
               docker:26.1.1 sh -c 'apk add --no-cache git curl coreutils && sh /diagnostic.sh'
@@ -41,6 +38,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gerrit-${{ matrix.environment }}-${{ matrix.user-agent }}
-          path: ${{ runner.temp }}/gerrit-clone/*.log
+          name: gerrit-${{ matrix.environment }}
+          path: ${{ runner.temp }}/gerrit-clone/**/*.log
           retention-days: 7
