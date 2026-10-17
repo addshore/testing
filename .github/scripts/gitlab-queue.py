@@ -46,6 +46,7 @@ def main():
     job_id = find_pending(get_json, os.environ.get("JOB_ID", ""))
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"pending={'true' if job_id else 'false'}\n")
+        output.write(f"job_id={job_id}\n")
     print(f"Pending github job: {job_id}" if job_id else "No matching pending job; no worker needed.")
 
 

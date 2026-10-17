@@ -128,10 +128,16 @@ Only pending events for project 16 run the queue check. That check re-reads the 
 from GitLab, so completed jobs and incompatible tags do not start a worker. Other
 job-status events produce a skipped workflow. A schedule checks the pending queue
 approximately every ten minutes if a webhook is missed; GitHub can delay scheduled
-runs. One worker runs at a time using this registration. Duplicate events that pass
-the check before the first worker starts may cause a later idle worker, which exits
-after 120 seconds. GitHub concurrency can replace a waiting worker; the schedule
-recovers any remaining pending work.
+runs. Separate GitLab jobs can start workers concurrently, subject to GitHub's hosted
+runner concurrency limits. Events for the same GitLab job share a concurrency
+group, so duplicates cannot start simultaneous workers. A duplicate that passes
+the check before its job starts may still cause a later idle worker, which exits
+after 120 seconds. The schedule recovers any remaining pending work.
+
+All workers reuse the same GitLab runner registration and authentication token.
+Each VM gets a random `.runner_system_id`, so managers are tracked and cleaned up
+independently even if GitHub's VM image has a shared machine ID. No extra runner
+registrations or tokens are needed.
 
 To test the complete connection, retry the GitLab smoke job without manually
 starting a GitHub workflow. Check the GitLab webhook's recent deliveries and the

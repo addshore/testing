@@ -32,8 +32,9 @@ jobs:
       contents: read
     outputs:
       pending: ${{ steps.check.outputs.pending }}
+      job_id: ${{ steps.check.outputs.job_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           persist-credentials: false
@@ -47,9 +48,9 @@ jobs:
   worker:
     needs: queue
     if: needs.queue.outputs.pending == 'true'
-    # Non-pending webhook events never join this group or displace waiting work.
+    # Different GitLab jobs can run concurrently; duplicate events share a group.
     concurrency:
-      group: gitlab-worker-trial
+      group: gitlab-worker-${{ needs.queue.outputs.job_id }}
       cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -88,6 +89,9 @@ jobs:
             exit 1
           fi
           cd "$RUNNER_TEMP/gitlab-worker"
+          # Hosted VM images can share /etc/machine-id. Give each manager its own
+          # ID so one worker's unregister cannot remove another worker's manager.
+          printf 'r_%s\n' "$(openssl rand -hex 6)" > .runner_system_id
           ./gitlab-runner register --non-interactive \
             --config config.toml \
             --url https://gitlab.wikimedia.org \

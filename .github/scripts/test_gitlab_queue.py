@@ -1,4 +1,8 @@
 import importlib.util
+import io
+import os
+import tempfile
+from unittest import mock
 from pathlib import Path
 import unittest
 
@@ -36,6 +40,15 @@ class QueueTest(unittest.TestCase):
             return [{"id": 101, "status": "pending", "tag_list": ["github"]}]
         self.assertEqual(queue.find_pending(get), "101")
         self.assertTrue(urls[-1].endswith("page=2"))
+
+    def test_outputs_selected_job_for_concurrency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "output"
+            env = {"GITLAB_API_READ_TOKEN": "fixture", "JOB_ID": "12", "GITHUB_OUTPUT": str(output)}
+            response = io.StringIO('{"id":12,"status":"pending","tag_list":["github"]}')
+            with mock.patch.dict(os.environ, env), mock.patch.object(queue.urllib.request, "urlopen", return_value=response):
+                queue.main()
+            self.assertEqual(output.read_text(), "pending=true\njob_id=12\n")
 
     def test_empty_queue(self):
         self.assertEqual(queue.find_pending(lambda _: []), "")
