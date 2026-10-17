@@ -1,0 +1,23 @@
+name: GitLab clone test
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  clone:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GIT_TERMINAL_PROMPT: '0'
+    steps:
+      - name: Clone mwcli from GitLab over public HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git --version
+          git clone --depth 50 --no-tags --branch main \
+            https://gitlab.wikimedia.org/repos/releng/cli.git \
+            "$RUNNER_TEMP/mwcli-clone"
+          git -C "$RUNNER_TEMP/mwcli-clone" log -1 --format='%h %s'
