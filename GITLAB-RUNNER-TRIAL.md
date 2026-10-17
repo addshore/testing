@@ -9,7 +9,7 @@ GitHub supplies the worker VM. The first trial is manual and processes one job.
 1. Publish `.github/workflows/gitlab-workers.yml` to `main` in `addshore/testing`.
 2. In the Wikimedia GitLab mwcli project, open **Settings > CI/CD > Runners > New
    project runner**. Give it the description `GitHub worker trial`, the single tag
-   `mwcli-github-test`, disable **Run untagged jobs**, and allow unprotected refs
+   `github`, disable **Run untagged jobs**, and allow unprotected refs
    if testing an MR. Restrict it to this project. Set its maximum job timeout to
    1800 seconds. Create it through this UI, rather than legacy registration tokens.
 3. Copy its runner authentication token (`glrt-...`) directly into
@@ -31,7 +31,7 @@ github-runner-smoke:
   stage: test
   image: docker:26.1.1
   tags:
-    - mwcli-github-test
+    - github
   services:
     - docker:26.1.1-dind
   variables:
