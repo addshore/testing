@@ -2,7 +2,9 @@
 
 This repository tests running mwcli's GitLab CI jobs on a temporary GitHub-hosted
 VM. GitLab schedules the job, clones its source and receives its logs and artifacts.
-GitHub supplies the worker VM. The first trial is manual and processes one job.
+GitHub supplies the worker VM. A job-event webhook starts a worker automatically
+when a job requiring only the `github` tag becomes pending. Each worker processes
+one job; a periodic queue check recovers missed events.
 
 ## One-time setup
 
@@ -16,10 +18,15 @@ GitHub supplies the worker VM. The first trial is manual and processes one job.
    **addshore/testing > Settings > Secrets and variables > Actions > New repository
    secret**, named `GITLAB_RUNNER_TOKEN`. Do not commit or paste it into a workflow.
 
-No GitLab API management token, GitHub dispatch token or webhook is needed for
-this first manual trial. Runner tags are configured in GitLab, not by the workflow.
-The workflow requests no GitHub token permissions and does not check out source
-from the testing repository.
+4. Add `GITLAB_API_READ_TOKEN` as an Actions secret. Use a project access token
+   scoped to mwcli, with Reporter access and only `read_api`. The queue checker
+   runs on a separate VM from the privileged worker. It checks current job status
+   and requires exactly the `github` tag. The token must be renewed before expiry.
+   The trial token created on 17 October 2026 expires on 16 November 2026.
+
+Runner tags are configured in GitLab, not by the workflow. Only the queue-check
+job has GitHub Contents read permission to fetch its trusted helper from `main`;
+the worker has no GitHub token permissions and receives only the runner token.
 
 ## Queue a smoke test
 
@@ -57,8 +64,10 @@ github-runner-smoke:
     expire_in: 1 day
 ```
 
-Click Play on the smoke job so it is pending. Then open **addshore/testing >
-Actions > GitLab worker trial > Run workflow**, choosing `main`.
+With the webhook enabled, click Play on the smoke job so it is pending; GitLab
+will dispatch the GitHub workflow automatically. Before enabling the webhook, or
+to troubleshoot it, open **addshore/testing > Actions > GitLab worker trial > Run
+workflow**, choosing `main`. Leaving `job_id` empty checks the pending queue.
 
 The workflow connects to GitLab, waits up to 120 seconds for work and exits after
 one job. If no matching job arrives it exits without processing one. Open the
@@ -75,13 +84,64 @@ UI-created project runner for the next run. GitHub destroys the VM afterwards.
 Forced cancellation can interrupt cleanup; inspect the GitLab runner if needed.
 Revoke/delete the project runner and remove the Actions secret to retire the trial.
 
-## Later automation
+## GitLab webhook
 
-Once the smoke and real integration tests pass, add job-event webhook dispatch,
-checks for still-pending jobs and required tags, duplicate protection, a bounded
-worker pool and a periodic queue check for missed events. Move to the `mwcli` tag
-only when ready to accept ordinary integration jobs. Run trusted workflow code
-from `main`; keep runner-management credentials outside the privileged workers.
+A webhook named **GitHub worker trial** (ID 72) is prepared in
+[the mwcli project](https://gitlab.wikimedia.org/repos/releng/cli/-/hooks).
+Its job events are initially disabled until authentication is added and the workflow
+is verified.
+
+Create a fine-grained GitHub token with resource owner `addshore`, repository access
+limited to `testing`, and **Repository permissions > Actions > Read and write**.
+Metadata read access is automatic; no Contents write permission is needed. Set an
+expiry and renew the header before it expires. Do not paste the token into chat or
+commit it.
+
+Edit the prepared GitLab webhook. Under **Custom headers**, add:
+
+- Name: `Authorization`
+- Value: `Bearer YOUR_GITHUB_TOKEN`
+
+Keep the existing Accept header, SSL verification enabled, and other triggers
+disabled. Once setup is complete, enable **Job events** and save.
+
+The configured URL is:
+
+```text
+https://api.github.com/repos/addshore/testing/actions/workflows/gitlab-workers.yml/dispatches
+```
+
+Its custom payload is:
+
+```json
+{
+  "ref": "main",
+  "inputs": {
+    "project_id": "{{project_id}}",
+    "job_id": "{{build_id}}",
+    "job_status": "{{build_status}}"
+  }
+}
+```
+
+Only pending events for project 16 run the queue check. That check re-reads the job
+from GitLab, so completed jobs and incompatible tags do not start a worker. Other
+job-status events produce a skipped workflow. A schedule checks the pending queue
+approximately every ten minutes if a webhook is missed; GitHub can delay scheduled
+runs. One worker runs at a time using this registration. Duplicate events that pass
+the check before the first worker starts may cause a later idle worker, which exits
+after 120 seconds. GitHub concurrency can replace a waiting worker; the schedule
+recovers any remaining pending work.
+
+To test the complete connection, retry the GitLab smoke job without manually
+starting a GitHub workflow. Check the GitLab webhook's recent deliveries and the
+GitHub Actions runs; GitLab should receive the test artifact as before.
+
+Move to the `mwcli` tag only after a real integration job passes. Keep this trial
+restricted to `github` for now. To disable automation, disable Job events in the
+GitLab webhook and disable the GitHub workflow (otherwise its schedule can still
+start workers). Delete the GitLab project access token and GitHub secrets when
+retiring the experiment.
 
 References:
 
