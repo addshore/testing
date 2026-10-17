@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Find pending jobs that the github-tagged mwcli trial runner can accept."""
+"""Find pending jobs that the mwcli Docker trial runner can accept."""
 
 import json
 import os
@@ -12,7 +12,7 @@ API = "https://gitlab.wikimedia.org/api/v4/projects/16/jobs"
 
 
 def eligible(job):
-    return job.get("status") == "pending" and set(job.get("tag_list", [])) == {"github"}
+    return job.get("status") == "pending" and set(job.get("tag_list", [])) in ({"mwcli", "dind"}, {"dind"}, {"github"})
 
 
 def find_pending(get_json, job_id=""):

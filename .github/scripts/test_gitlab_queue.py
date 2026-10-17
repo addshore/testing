@@ -15,13 +15,18 @@ class QueueTest(unittest.TestCase):
     def test_pending_job(self):
         self.assertEqual(queue.find_pending(lambda _: {"id": 1, "status": "pending", "tag_list": ["github"]}, "1"), "1")
 
+    def test_current_and_migration_tags(self):
+        for tags in [["mwcli", "dind"], ["dind", "mwcli"], ["dind"], ["github"]]:
+            with self.subTest(tags=tags):
+                self.assertTrue(queue.eligible({"status": "pending", "tag_list": tags}))
+
     def test_finished_running_or_cancelled_job(self):
         for state in ["running", "success", "failed", "canceled", "manual"]:
             with self.subTest(state=state):
                 self.assertEqual(queue.find_pending(lambda _: {"id": 1, "status": state, "tag_list": ["github"]}, "1"), "")
 
     def test_incompatible_tags(self):
-        for tags in [[], ["wmcs"], ["mwcli"], ["github", "other"]]:
+        for tags in [[], ["wmcs"], ["mwcli"], ["github", "other"], ["mwcli", "dind", "other"]]:
             with self.subTest(tags=tags):
                 self.assertFalse(queue.eligible({"status": "pending", "tag_list": tags}))
 
