@@ -1,0 +1,35 @@
+name: Holesail integration validation
+on:
+  push:
+    branches: [codex/holesail-ci-smoke]
+    paths:
+      - source/**
+      - .github/workflows/holesail-validation.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  holesail:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Fetch the successful MR build and prepared MediaWiki snapshot
+        shell: bash
+        run: |
+          mkdir inputs
+          curl --fail --silent --show-error --location --retry 3 https://gitlab.wikimedia.org/api/v4/projects/16/jobs/1002365/artifacts/bin/mw -o inputs/mw
+          curl --fail --silent --show-error --location --retry 3 https://gitlab.wikimedia.org/api/v4/projects/16/jobs/1002366/artifacts/.cache/mediawiki.tar.gz -o inputs/mediawiki.tar.gz
+          python3 - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          Path('inputs/plan.json').write_text(json.dumps({
+              'tested_sha': sha, 'pipeline_id': 238811, 'request_id': 1002370,
+          }))
+          PY
+      - name: Run the production helper and real Holesail test
+        working-directory: source
+        run: python3 tools/ci/run-github-integration.py docker-tunnel-holesail
