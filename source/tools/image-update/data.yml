@@ -1,0 +1,73 @@
+images: 
+  # docker dev env: Base services
+  - image: defreitas/dns-proxy-server:5.9.0
+  # docker dev env: MediaWiki related services
+  - image: docker-registry.wikimedia.org/releng/node20-test-browser:20.20.2
+  - image: docker-registry.wikimedia.org/releng/quibble-buster-php83:1.9.1
+  - image: docker-registry.wikimedia.org/dev/bookworm-php83-fpm:1.0.0
+  - image: docker-registry.wikimedia.org/dev/bookworm-apache2:1.0.1
+  # docker dev env: Misc services
+  # TODO: make wdqs images work with semver
+  - image: wikibase/wdqs-frontend:wmde.11
+    noCheck: true
+  - image: wikibase/wdqs:0.3.121-wmde.11
+    noCheck: true
+  - image: wikibase/wdqs-proxy:wmde.11
+    noCheck: true
+  - image: postgres:13.23
+    requireRegex: 13\.\d+$
+  - image: mariadb:10.11
+    requireRegex: 10\.\d+$
+  - image: phpmyadmin/phpmyadmin:5
+    noCheck: true
+  - image: adminer:4
+    noCheck: true
+  - image: mailhog/mailhog:v1.0.1
+    requireRegex: v1\.\d+(\.\d+)?
+  - image: memcached:1.6
+    requireRegex: 1\.\d+$
+  - image: redis:8.6.4
+    requireRegex: 6\.\d+$
+  - image: quay.io/keycloak/keycloak:18.0.0
+    requireRegex: 18\.\d+\.\d+
+  - image: graphiteapp/graphite-statsd:1.1.10-4
+    requireRegex: 1\.\d+\.\d+(\-\d+)
+  - image: docker-registry.wikimedia.org/repos/search-platform/cirrussearch-elasticsearch-image:v7.10.2-12
+  # docker dev env: Other stuff
+  - image: alpine/socat:1.7.4.4-r0
+    requireRegex: 1\.\d+\.\d+(\.\d+)?(-r\d+)?$
+  # docker dev env: Regularly released WMF production images
+  - image: docker-registry.wikimedia.org/repos/data-engineering/eventgate-wikimedia:v1.31.0
+  # Latest images...
+  - image: ubuntu:latest
+    noCheck: true
+  - image: registry.gitlab.com/gitlab-org/release-cli:latest
+    noCheck: true
+  - image: docker-registry.wikimedia.org/httpd-fcgi:latest
+    noCheck: true
+  # Golang images
+  - image: golang:1.23-alpine
+    noCheck: true
+  # Golang CI images
+  - image: golang:1.23
+    noCheck: true
+imageGroups:
+  # docker dev env: Regularly released WMF production images
+  - name: docker-registry.wikimedia.org/wikimedia/mediawiki-libs-shellbox
+    sameTagMatcher: ^(\d{4}\-\d{2}\-\d{2}\-\d{6})\-
+    images:
+      - image: docker-registry.wikimedia.org/wikimedia/mediawiki-libs-shellbox:2026-07-03-212105-media83
+        requireRegex: \d{4}\-\d{2}\-\d{2}\-\d{6}\-media
+      - image: docker-registry.wikimedia.org/wikimedia/mediawiki-libs-shellbox:2026-07-03-212105-php-rpc83
+        requireRegex: \d{4}\-\d{2}\-\d{2}\-\d{6}\-php-rpc
+      - image: docker-registry.wikimedia.org/wikimedia/mediawiki-libs-shellbox:2026-07-03-212105-score83
+        requireRegex: \d{4}\-\d{2}\-\d{2}\-\d{6}\-score
+      - image: docker-registry.wikimedia.org/wikimedia/mediawiki-libs-shellbox:2026-07-03-212105-syntaxhighlight83
+        requireRegex: \d{4}\-\d{2}\-\d{2}\-\d{6}\-syntaxhighlight
+      - image: docker-registry.wikimedia.org/wikimedia/mediawiki-libs-shellbox:2026-07-03-212105-timeline83
+        requireRegex: \d{4}\-\d{2}\-\d{2}\-\d{6}\-timeline
+# Files and directories to check
+files:
+directories:
+  - mount/dev
+  - .gitlab/pipelines
