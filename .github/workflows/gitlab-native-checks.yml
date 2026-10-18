@@ -1,0 +1,17 @@
+name: Native GitLab bridge checks
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Test callbacks, receipts, retries and native execution fixtures
+        run: |
+          python3 -m unittest discover -s tools/ci -p 'test_*.py'
+          python3 -m unittest discover -s .github/scripts -p 'test_gitlab_native.py'
