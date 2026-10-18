@@ -49,6 +49,8 @@ replace its GitLab bot ID when the trial finishes.
 
 For a controlled failure/retry test, set the Actions repository variable
 `GITLAB_TRIAL_FAIL_TEST` to `mysql-cycle` before dispatching. The workflow will
-run the real test, then deliberately fail that native job. Verify the GitLab
-status and gate fail, delete the variable, and use Re-run failed jobs in GitHub.
+run the real test, then deliberately fail that native job. Verify the GitLab status fails and its gate stays blocked, delete the variable,
+and use Re-run failed jobs in GitHub. The bot starts the gate only once every
+result passes, avoiding GitLab 19.2's stale-variable behavior on failed manual
+job retries.
 This injection exists only in this testing repository's reusable workflow.
