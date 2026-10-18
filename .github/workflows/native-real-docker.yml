@@ -1,14 +1,16 @@
 name: Native real Docker trial
 on:
-  push:
-    branches: [test/native-real-docker]
-    paths: [source/**, .github/workflows/native-real-docker.yml]
   workflow_dispatch:
+    inputs:
+      platform:
+        type: choice
+        options: [windows, macos, all]
+        default: all
 permissions:
   contents: read
 jobs:
   windows:
-    if: github.event_name == 'workflow_dispatch'
+    if: inputs.platform != 'macos'
     runs-on: windows-2025
     timeout-minutes: 25
     steps:
@@ -41,6 +43,7 @@ jobs:
           ./bin/mw.exe --no-interaction dev --context=real-docker-check where
           bash tests/check-platform.sh
   macos:
+    if: inputs.platform != 'windows'
     runs-on: macos-15
     timeout-minutes: 30
     steps:
