@@ -1,0 +1,461 @@
+package update
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/AlecAivazis/survey/v2"
+	"github.com/blang/semver"
+	"github.com/charmbracelet/bubbles/progress"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
+	"gitlab.wikimedia.org/repos/releng/cli/internal/cli"
+	"gitlab.wikimedia.org/repos/releng/cli/internal/cmdgloss"
+	gitlabb "gitlab.wikimedia.org/repos/releng/cli/internal/gitlab"
+	"gitlab.wikimedia.org/repos/releng/cli/internal/updater"
+	cobrautil "gitlab.wikimedia.org/repos/releng/cli/internal/util/cobra"
+	"golang.org/x/term"
+)
+
+func Cmd() *cobra.Command {
+	versionInput := ""
+	dryRun := false
+	force := false
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Checks for and performs updates",
+		Example: cobrautil.NormalizeExample(`update
+update --version=v0.10.0 --no-interaction
+update --force
+update --version=https://gitlab.wikimedia.org/repos/releng/cli/-/jobs/252738/artifacts/download`),
+		Run: func(cmd *cobra.Command, args []string) {
+			currDetails := cli.VersionDetails
+			var targetVersion cli.Version
+			var targetArtifact string
+
+			// No manual version, so generally check for new releases
+			if versionInput == "" {
+				targetRelease, err := gitlabb.RelengCliLatestRelease()
+				if err != nil {
+					// TODO allow err of not found?
+					logrus.Error(fmt.Errorf("could not fetch latest release link: %s", err))
+					os.Exit(1)
+				}
+
+				targetVersion = cli.VersionFromUserInput(targetRelease.TagName)
+
+				// Make sure we are not already on the latest version (unless --force is set)
+				if !force && currDetails.Version == targetVersion {
+					cmd.Println("You are already on the latest version: " + targetVersion.String())
+					os.Exit(0)
+				}
+
+				// TODO actually do semver comparison
+				// But this probably doesn't matter right now, as we generally only have 1 stream of released going at a time...
+
+				targetReleaseLink, err := gitlabb.RelengCliReleaseBinary(targetVersion.Tag())
+				if err != nil {
+					// TODO allow err of not found?
+					logrus.Error(fmt.Errorf("could not fetch release binary link: %s", err))
+					os.Exit(1)
+				}
+
+				cmd.Println("New update found: " + targetVersion.String())
+				cmd.Println("Release URL: " + targetVersion.ReleasePage())
+				cmd.Println("Artifact URL: " + targetArtifact)
+				targetArtifact = targetReleaseLink.DirectAssetURL
+			} else {
+				// Manual version is URL or local file path?
+				isURL := len(versionInput) >= 4 && (versionInput[:4] == "http" || (len(versionInput) >= 7 && versionInput[:7] == "file://"))
+				isLocalFile := len(versionInput) > 0 && (versionInput[0] == '/' || (len(versionInput) > 1 && versionInput[1] == ':')) // Unix path or Windows path
+
+				if isURL || isLocalFile {
+					// TODO if we can auto detect a gitlab build, link to that too
+					cmd.Println("Artifact URL: " + versionInput)
+					targetArtifact = versionInput
+				} else {
+					// Probably gitlab version of tag
+					targetVersion = cli.VersionFromUserInput(versionInput)
+
+					targetReleaseLink, err := gitlabb.RelengCliReleaseBinary(targetVersion.Tag())
+					if err != nil {
+						// TODO, allow err of not found?
+						logrus.Error(fmt.Errorf("could not fetch release binary link: %s", err))
+						os.Exit(1)
+					}
+
+					cmd.Println("Updating to manually selected version: " + targetVersion.String())
+					cmd.Println("Release URL: " + targetVersion.ReleasePage())
+					cmd.Println("Artifact URL: " + targetReleaseLink.DirectAssetURL)
+					targetArtifact = targetReleaseLink.DirectAssetURL
+				}
+			}
+
+			// If we are in interactive mode, confirm the user wants to continue with the update
+			if !cli.Opts.NoInteraction && !dryRun {
+				response := false
+				prompt := &survey.Confirm{
+					Message: "Do you want to update?",
+				}
+				err := survey.AskOne(prompt, &response)
+				if err != nil {
+					cmd.Println(err)
+					os.Exit(1)
+				}
+				if !response {
+					cmd.Println("Update cancelled")
+					os.Exit(0)
+				}
+			}
+
+			// Perform the update
+			var newMwFileLocation string
+			if !dryRun {
+				response, err := updater.DownloadFileResponse(targetArtifact)
+				if err != nil {
+					cmd.Println(err)
+					os.Exit(1)
+				}
+				defer response.Body.Close()
+
+				if response.ContentLength <= 0 {
+					logrus.Warn("Could not parse content length, so download progress display may be broken")
+				}
+
+				tempDirDownload, tempDirDownloadCloser := tmpDir("mwcli-update-download")
+				defer tempDirDownloadCloser()
+				tempDownloadFile, err := os.CreateTemp(tempDirDownload, "download-*.tmp")
+				if err != nil {
+					logrus.Error(fmt.Errorf("could not create temp file for download: %s", err))
+					os.Exit(1)
+				}
+				defer tempDownloadFile.Close()
+				tempDownloadFilePath := tempDownloadFile.Name()
+
+				// Check if we have a TTY for progress bar display
+				isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+
+				if isTTY {
+					// Show progress bar only in TTY environments
+					var p *tea.Program
+					pw := &cmdgloss.ProgressWriter{
+						Total:  int(response.ContentLength),
+						File:   tempDownloadFile,
+						Reader: response.Body,
+						OnProgress: func(ratio float64) {
+							p.Send(cmdgloss.ProgressMsg(ratio))
+						},
+					}
+					m := cmdgloss.Model{
+						Pw:       pw,
+						Progress: progress.New(progress.WithDefaultGradient()),
+					}
+					p = tea.NewProgram(m)
+					go pw.Start() // Start the download
+					if _, err := p.Run(); err != nil {
+						cmd.Println("error with progress bar:", err)
+						os.Exit(1)
+					}
+					if int64(pw.Downloaded) < response.ContentLength {
+						logrus.Error("Download seems incomplete.")
+						os.Exit(1)
+					}
+				} else {
+					// No TTY available, just copy directly without progress bar
+					_, err := tempDownloadFile.ReadFrom(response.Body)
+					if err != nil {
+						logrus.Error(fmt.Errorf("could not download file: %s", err))
+						os.Exit(1)
+					}
+					if response.ContentLength > 0 {
+						// Get the actual file size to verify download
+						fileInfo, err := tempDownloadFile.Stat()
+						if err != nil {
+							logrus.Error(fmt.Errorf("could not get temp file size: %s", err))
+							os.Exit(1)
+						}
+						if fileInfo.Size() < response.ContentLength {
+							logrus.Error("Download seems incomplete.")
+							os.Exit(1)
+						}
+					}
+				}
+
+				// Is the file a zip?
+				if updater.IsZipFile(tempDownloadFilePath) {
+					tempDir, tempDirCloser := tmpDir("mwcli-update-extract")
+					defer tempDirCloser()
+
+					logrus.Trace("Unzipping downloaded file: " + tempDownloadFilePath)
+					err = updater.Unzip(tempDownloadFilePath, tempDir)
+					if err != nil {
+						logrus.Error("could not unzip the downloaded file: "+tempDownloadFilePath, err)
+						os.Exit(1)
+					}
+					// it should contain a dir called bin, and in that a file called mw
+					newMwFileLocation = tempDir + "/bin/mw"
+				} else {
+					newMwFileLocation = tempDownloadFilePath
+				}
+
+				// Make sure it exists or error
+				if _, err := os.Stat(newMwFileLocation); os.IsNotExist(err) {
+					logrus.Error(fmt.Errorf("could not find the mw binary in the downloaded file: %s", newMwFileLocation))
+					os.Exit(1)
+				}
+
+				executablePath, err := getExecutablePath()
+				if err != nil {
+					logrus.Error(fmt.Errorf("could not get the current executable path: %s", err))
+					os.Exit(1)
+				}
+
+				executableName := executableNameFromPath(executablePath)
+				logrus.Trace("Current executable name: " + executableName)
+				logrus.Trace("Current executable path: " + executablePath)
+
+				// Make a copy of the current binary, in a temp location
+				tempCopyName := executableName + ".update-copy." + time.Now().Format("2006-01-02-15-04-05")
+				// Get a full path in the temporary dir
+				tempDir, tempDirCloser := tmpDir("mwcli-update-backup")
+				defer tempDirCloser()
+				tempCopyPath := filepath.Join(tempDir, tempCopyName)
+
+				// Copy the current binary to a temp location
+				_, err = copyFile(executablePath, tempCopyPath)
+				if err != nil {
+					logrus.Error(fmt.Errorf("could not backup current binary: %s", err))
+					os.Exit(1)
+				}
+				defer os.Remove(tempCopyPath)
+
+				if runtime.GOOS == "windows" {
+					err = scheduleWindowsReplacement(newMwFileLocation, executablePath)
+					if err != nil {
+						logrus.Error(fmt.Errorf("could not schedule Windows replacement: %s", err))
+						os.Exit(1)
+					}
+					cmd.Println("Update staged. Please run the command again in a moment to use the new version.")
+					os.Exit(0)
+				}
+
+				// On non-Windows systems, avoid writing directly to the currently-running
+				// executable (can fail with ETXTBSY). Stage a file in the destination
+				// directory and atomically rename it into place.
+				err = replaceExecutableNonWindows(newMwFileLocation, executablePath)
+				if err != nil {
+					logrus.Error(fmt.Errorf("could not move new binary to location: %s", err))
+					// Switch them back
+					copyFile(tempCopyPath, executablePath)
+					os.Exit(1)
+				}
+				defer os.Remove(newMwFileLocation)
+
+				// Make sure it is executable
+				// TODO only do this, if it wasn't already executable?
+				err = os.Chmod(executablePath, 0o755)
+				if err != nil {
+					logrus.Error(fmt.Errorf("could not make new binary executable: %s", err))
+					// Switch them back
+					copyFile(tempCopyPath, executablePath)
+					os.Exit(1)
+				}
+			} else {
+				cmd.Println("Dry run, no actual update performed")
+				if targetVersion != "" {
+					cmd.Println("Would have updated to version: " + targetVersion + " (using Gitlab releases)")
+				}
+				if targetArtifact != "" {
+					cmd.Println("Would have updated from build artifact: " + targetArtifact + " (using Gitlab CI artifacts)")
+				}
+			}
+
+			cmd.Println("Update successful")
+
+			if targetVersion != "" {
+				cmd.Println(describeVersionTransition(currDetails.Version, targetVersion))
+			}
+
+			// Output changelog of the versions we are moving between
+			if targetVersion != "" {
+				// If the versions are the same, nothing changes
+				if targetVersion == currDetails.Version {
+					cmd.Println("No changes between versions")
+					os.Exit(0)
+				}
+
+				releasesUpdatedThrough, err := updater.RelengCliGetReleasesBetweenTags(currDetails.Version.Tag(), targetVersion.Tag())
+				if err != nil {
+					logrus.Error(fmt.Errorf("could not fetch release notes for transition %s -> %s: %s", currDetails.Version, targetVersion, err))
+					cmd.Println("You can try running the following command to see the last version's changelog:")
+					cmd.Println("  " + targetVersion.ReleaseNotesCommand())
+					cmd.Println("Or view the changelog online:")
+					cmd.Println("  " + targetVersion.ReleasePage())
+				} else {
+					cmd.Printf("\nRelease notes for transition %s -> %s:\n\n", currDetails.Version, targetVersion)
+					if len(releasesUpdatedThrough) == 0 {
+						cmd.Println("No release notes to display for this version transition.")
+					}
+					for _, release := range releasesUpdatedThrough {
+						desc := strings.Trim(release.Description, "\r\n")
+						// TODO Remove any lines that start with "CHANGELOG extracted from"
+						formatted := strings.Trim(cli.RenderMarkdown(desc), "\r\n")
+						cmd.Println(formatted)
+						cmd.Println()
+					}
+				}
+			}
+		},
+	}
+	cmd.Flags().StringVarP(&versionInput, "version", "", "", "Specific version to \"update\" to, or rollback to.")
+	cmd.Flags().BoolVarP(&dryRun, "dry-run", "", false, "Show what would be updated, but don't actually update.")
+	cmd.Flags().BoolVarP(&force, "force", "", false, "Force force and reinstall even if already on the latest version.")
+	return cmd
+}
+
+func scheduleWindowsReplacement(srcPath, destPath string) error {
+	escape := func(s string) string {
+		return strings.ReplaceAll(s, "'", "''")
+	}
+
+	script := fmt.Sprintf("$src='%s'; $dst='%s'; for ($i=0; $i -lt 100; $i++) { try { Copy-Item -LiteralPath $src -Destination $dst -Force; Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue; exit 0 } catch { Start-Sleep -Milliseconds 200 } }; exit 1", escape(srcPath), escape(destPath))
+
+	command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return command.Start()
+}
+
+func copyFile(in, out string) (int64, error) {
+	logrus.Trace("Copying file from: " + in + " to: " + out)
+	i, e := os.Open(in)
+	if e != nil {
+		return 0, e
+	}
+	defer i.Close()
+	o, e := os.Create(out)
+	if e != nil {
+		return 0, e
+	}
+	defer o.Close()
+	return o.ReadFrom(i)
+}
+
+func tmpDir(name string) (string, func()) {
+	tempDir, err := os.MkdirTemp(os.TempDir(), name)
+	if err != nil {
+		logrus.Error(fmt.Errorf("could not create temp dir for %s: %s", name, err))
+		os.Exit(1)
+	}
+	logrus.Trace("Created temp dir: " + tempDir)
+	return tempDir, func() {
+		os.RemoveAll(tempDir)
+		logrus.Trace("Removed temp dir: " + tempDir)
+	}
+}
+
+// getExecutablePath returns a reliable path to the current executable.
+// On Linux, it uses /proc/self/exe which is more reliable than os.Executable()
+// in containerized environments. Falls back to os.Executable() on other systems.
+func getExecutablePath() (string, error) {
+	// On Linux, try /proc/self/exe first (more reliable in containers)
+	procExe := "/proc/self/exe"
+	if fi, err := os.Lstat(procExe); err == nil && (fi.Mode()&os.ModeSymlink) != 0 {
+		// It's a symlink, resolve it
+		target, err := os.Readlink(procExe)
+		if err == nil && target != "" {
+			logrus.Trace("Using /proc/self/exe: " + target)
+			return target, nil
+		}
+	}
+
+	// Fall back to os.Executable()
+	execPath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+
+	// Try to resolve symlinks using filepath.EvalSymlinks for a more stable result
+	resolvedPath, err := filepath.EvalSymlinks(execPath)
+	if err == nil && resolvedPath != "" {
+		logrus.Trace("Using resolved executable path: " + resolvedPath)
+		return resolvedPath, nil
+	}
+
+	// If resolution fails, use the original path
+	logrus.Trace("Using os.Executable path: " + execPath)
+	return execPath, nil
+}
+
+func executableNameFromPath(executablePath string) string {
+	idx := strings.LastIndexAny(executablePath, "/\\")
+	if idx == -1 {
+		return executablePath
+	}
+	if idx+1 >= len(executablePath) {
+		return executablePath
+	}
+	return executablePath[idx+1:]
+}
+
+func replaceExecutableNonWindows(newPath, destPath string) error {
+	// Fast path: same filesystem rename directly into place.
+	if err := os.Rename(newPath, destPath); err == nil {
+		return nil
+	} else {
+		logrus.Trace("Direct os.Rename failed, using same-directory staged replacement: " + err.Error())
+	}
+
+	destDir := filepath.Dir(destPath)
+	stagedFile, err := os.CreateTemp(destDir, ".mw-update-staged-*")
+	if err != nil {
+		return err
+	}
+	stagedPath := stagedFile.Name()
+	if err := stagedFile.Close(); err != nil {
+		_ = os.Remove(stagedPath)
+		return err
+	}
+
+	_, err = copyFile(newPath, stagedPath)
+	if err != nil {
+		_ = os.Remove(stagedPath)
+		return err
+	}
+
+	if err := os.Chmod(stagedPath, 0o755); err != nil {
+		_ = os.Remove(stagedPath)
+		return err
+	}
+
+	if err := os.Rename(stagedPath, destPath); err != nil {
+		_ = os.Remove(stagedPath)
+		return err
+	}
+
+	return nil
+}
+
+func describeVersionTransition(from, to cli.Version) string {
+	if from == to {
+		return "Version unchanged: " + from.String()
+	}
+
+	fromSemver, fromErr := semver.Parse(from.String())
+	toSemver, toErr := semver.Parse(to.String())
+	if fromErr == nil && toErr == nil {
+		cmp := fromSemver.Compare(toSemver)
+		if cmp < 0 {
+			return fmt.Sprintf("Upgraded from %s to %s.", from, to)
+		}
+		if cmp > 0 {
+			return fmt.Sprintf("Downgraded from %s to %s.", from, to)
+		}
+	}
+
+	return fmt.Sprintf("Updated from %s to %s.", from, to)
+}

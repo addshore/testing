@@ -1,0 +1,3 @@
+compose ps
+compose -v=2 ps
+compose -v=2 ps -- --services

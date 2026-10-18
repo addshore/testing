@@ -1,0 +1,90 @@
+package cloudvps
+
+import (
+	"github.com/gophercloud/gophercloud/v2"
+	"github.com/gophercloud/gophercloud/v2/openstack"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/servers"
+	"github.com/spf13/cobra"
+	"gitlab.wikimedia.org/repos/releng/cli/internal/util/output"
+)
+
+func NewComputeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "compute",
+		Short: "Manage compute resources",
+	}
+
+	cmd.AddCommand(NewComputeListCmd())
+	cmd.AddCommand(NewComputeGetCmd())
+	cmd.AddCommand(NewComputeCreateCmd())
+	cmd.AddCommand(NewComputeSSHCmd())
+
+	return cmd
+}
+
+func NewComputeListCmd() *cobra.Command {
+	out := output.Output{
+		TableBinding: &output.TableBinding{
+			Headings: []string{"Name", "Status", "ID"},
+			RowExtractor: func(object interface{}) []string {
+				typedObject, ok := object.(servers.Server)
+				if !ok {
+					return nil
+				}
+				return []string{typedObject.Name, typedObject.Status, typedObject.ID}
+			},
+		},
+		PrettyBinding: func(objects interface{}, pretty *output.Pretty) {
+			objMap, ok := objects.(map[interface{}]interface{})
+			if ok {
+				for _, object := range objMap {
+					typedObject, ok := object.(servers.Server)
+					if !ok {
+						continue
+					}
+					pretty.AddItem(typedObject.Status, typedObject.Name+" @ "+typedObject.ID)
+				}
+			}
+		},
+	}
+
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List compute resources",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			providerClient, err := authenticatedProvider(cmd)
+			if err != nil {
+				return err
+			}
+			computeClient, err := openstack.NewComputeV2(providerClient, gophercloud.EndpointOpts{})
+			if err != nil {
+				return err
+			}
+
+			// List all servers
+			allPages, err := servers.List(computeClient, servers.ListOpts{}).AllPages(cmd.Context())
+			if err != nil {
+				return err
+			}
+
+			allServers, err := servers.ExtractServers(allPages)
+			if err != nil {
+				return err
+			}
+
+			objects := make(map[interface{}]interface{}, len(allServers))
+			for key, server := range allServers {
+				objects[key] = server
+			}
+
+			out.Print(cmd, objects)
+
+			return nil
+		},
+	}
+
+	out.AddFlagsWithOpts(cmd, output.WithDefaultTTY(output.PrettyType), output.WithDefaultPipe(output.JSONType))
+	cmd.Flags().String("project", "", "Project name (optional, uses default project if not specified)")
+
+	return cmd
+}

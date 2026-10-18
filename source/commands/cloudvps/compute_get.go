@@ -1,0 +1,62 @@
+package cloudvps
+
+import (
+	"github.com/gophercloud/gophercloud/v2"
+	"github.com/gophercloud/gophercloud/v2/openstack"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/servers"
+	"github.com/spf13/cobra"
+	"gitlab.wikimedia.org/repos/releng/cli/internal/util/output"
+)
+
+func NewComputeGetCmd() *cobra.Command {
+	out := output.Output{
+		TableBinding: &output.TableBinding{
+			Headings: []string{"Name", "Status", "ID"},
+			RowExtractor: func(object interface{}) []string {
+				typedObject, ok := object.(*servers.Server)
+				if !ok {
+					return nil
+				}
+				return []string{typedObject.Name, typedObject.Status, typedObject.ID}
+			},
+		},
+		PrettyBinding: func(objects interface{}, pretty *output.Pretty) {
+			typedObject, ok := objects.(*servers.Server)
+			if !ok {
+				return
+			}
+			pretty.AddItem(typedObject.Status, typedObject.Name+" @ "+typedObject.ID)
+		},
+	}
+
+	cmd := &cobra.Command{
+		Use:   "get <id>",
+		Short: "Get a compute resource by ID",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := args[0]
+			providerClient, err := authenticatedProvider(cmd)
+			if err != nil {
+				return err
+			}
+			computeClient, err := openstack.NewComputeV2(providerClient, gophercloud.EndpointOpts{})
+			if err != nil {
+				return err
+			}
+
+			server, err := servers.Get(cmd.Context(), computeClient, id).Extract()
+			if err != nil {
+				return err
+			}
+
+			out.Print(cmd, server)
+
+			return nil
+		},
+	}
+
+	out.AddFlagsWithOpts(cmd, output.WithDefaultTTY(output.PrettyType), output.WithDefaultPipe(output.JSONType))
+	cmd.Flags().String("project", "", "Project name (optional, uses default project if not specified)")
+
+	return cmd
+}
