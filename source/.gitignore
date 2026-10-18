@@ -1,0 +1,15 @@
+.idea
+.vscode/mcp.json
+/bin
+/.build
+/.lint-*
+/_release
+/_docs
+/vendor
+coverage.txt
+coverage.html
+coverage.xml
+junit.xml
+.mediawiki
+/.cache/
+code-gen

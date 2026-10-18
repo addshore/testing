@@ -1,0 +1,386 @@
+variables:
+  DOCKER_TLS_CERTDIR: "/certs"
+
+stages:
+  - test
+  - build
+  - integration
+  - release
+
+# Every MR job checks out the same temporary merge, including security scans.
+.merged-source:
+    before_script: &checkout-merged-source
+      - |
+        if [ "$CI_PIPELINE_SOURCE" = "merge_request_event" ]; then
+          git fetch --no-tags .ci-merge.bundle HEAD
+          rm .ci-merge.bundle
+          git checkout --detach FETCH_HEAD
+        fi
+    needs:
+      - &merged-source-need
+        job: prepare-merge
+        optional: true
+
+.commit-job:
+    extends: .merged-source
+    rules:
+      - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG'
+
+prepare-merge:
+    image: golang:1.26.1
+    tags:
+      - wmcs
+    stage: .pre
+    needs: []
+    cache: []
+    variables:
+      GIT_DEPTH: "0"
+    rules:
+      - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    script:
+      - bash tests/prepare-merge.sh
+    artifacts:
+      expire_in: 1 day
+      paths:
+        - .ci-merge.bundle
+
+# Extend the imported analyzers without replacing their scripts or rules.
+.sast-analyzer:
+    before_script: *checkout-merged-source
+    needs:
+      - *merged-source-need
+
+secret_detection:
+    before_script: *checkout-merged-source
+    needs:
+      - *merged-source-need
+
+# Keep Go modules and compilation results inside the checkout so Runner can cache
+# them. Separate job keys avoid parallel jobs overwriting each other's caches.
+.go-job:
+    extends: .commit-job
+    image: golang:1.26.1
+    tags:
+      - wmcs
+    variables:
+      GOCACHE: "$CI_PROJECT_DIR/.cache/go-build"
+      GOMODCACHE: "$CI_PROJECT_DIR/.cache/go-mod"
+      GOLANGCI_LINT_CACHE: "$CI_PROJECT_DIR/.cache/golangci-lint"
+      CACHE_COMPRESSION_FORMAT: tarzstd
+      CACHE_COMPRESSION_LEVEL: fastest
+    cache:
+      key: "go1.26.1-$CI_JOB_NAME_SLUG"
+      paths:
+        - .cache/go-build/
+        - .cache/go-mod/
+        - .cache/golangci-lint/
+
+test:
+    extends: .go-job
+    stage: test
+    coverage: '/Total coverage: \d+.\d+%/'
+    artifacts:
+      when: always
+      expire_in: 2 weeks
+      paths:
+        - coverage.txt
+        - coverage.xml
+        - junit.xml
+      reports:
+        junit: junit.xml
+        coverage_report: 
+          coverage_format: cobertura
+          path: coverage.xml
+    script:
+      - make test
+
+checks:
+    extends: .go-job
+    stage: test
+    parallel:
+      matrix:
+        - CHECK: lint
+        - CHECK: linti
+        - CHECK: vet
+        - CHECK: git-state
+    script:
+      - make $CHECK
+
+tools:
+    extends: .go-job
+    stage: test
+    parallel:
+      matrix:
+        - TOOL: ./tools/image-update/check/check.go
+        - TOOL: ./tools/image-update/update/update.go foo bar
+        # docs-gen tool is tested as docs are generated
+        # lint tool is checked as linting is run
+    script:
+      - go run $TOOL
+
+build:
+    extends: .go-job
+    stage: build
+    artifacts:
+      paths:
+        - bin/
+    script:
+      - make build
+
+# Basic command tests need the binary, but neither Docker nor MediaWiki.
+integration-cli:
+    extends: .commit-job
+    stage: integration
+    image: golang:1.26.1
+    tags:
+      - wmcs
+    cache: []
+    needs:
+      - *merged-source-need
+      - job: build
+    parallel:
+      matrix:
+        - TEST_SCRIPT: test-general.sh
+        - TEST_SCRIPT: test-general-online.sh
+    script:
+      - ./tests/$TEST_SCRIPT
+
+# Prepare once per pipeline. Cache one archive locally between pipelines and use
+# an artifact to distribute the same clean snapshot across the Docker workers.
+prepare-mediawiki:
+    extends: .commit-job
+    image:
+      name: docker-registry.wikimedia.org/releng/node20-test-browser-php83-composer:20.20.2-s2
+      entrypoint: [""]
+      docker:
+        user: "0"
+    tags:
+      - wmcs
+    stage: build
+    variables:
+      MWCLI_CI_NATIVE_DEPS: "1"
+      COMPOSER_ALLOW_SUPERUSER: "1"
+    cache:
+      key:
+        prefix: mediawiki-snapshot-v1
+        files:
+          - tests/cache-mediawiki.sh
+          - tests/prepare-mediawiki.sh
+      paths:
+        - .cache/mediawiki.tar.gz
+    artifacts:
+      expire_in: 1 day
+      paths:
+        - .cache/mediawiki.tar.gz
+    script:
+      - bash tests/prepare-mediawiki.sh
+
+# Cloning code uses Git and local environment files, not a Docker daemon.
+integration-get-code:
+    extends: .commit-job
+    image: golang:1.26.1
+    tags:
+      - wmcs
+    cache: []
+    stage: integration
+    needs: [*merged-source-need,checks,test,build]
+    script:
+      - ./tests/test-docker-get-code.sh
+
+# Dispatch explicitly after prerequisites; no Job events webhook is needed.
+# Neither this job nor the gate needs a long-lived GitLab/GitHub secret.
+integration-github-request:
+    image: python:3.13-alpine
+    tags: [mwcli-wait]
+    timeout: 10m
+    stage: integration
+    variables:
+      GIT_STRATEGY: none
+      INTEGRATION_TEST_PLAN: >-
+        [{"platform":"linux-amd64","test":"docker-general"},
+         {"platform":"linux-amd64","test":"all-databases"},
+         {"platform":"linux-amd64","test":"mysql-cycle"},
+         {"platform":"linux-amd64","test":"repoclient"},
+         {"platform":"windows-amd64","test":"windows-update"},
+         {"platform":"linux-amd64","test":"docker-tunnel-holesail"},
+         {"platform":"macos-arm64","test":"macos-sudo-update"}]
+    cache: []
+    rules:
+      - if: '$CI_PROJECT_ID == "16" && ($CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG)'
+    needs:
+      - job: checks
+        artifacts: false
+      - job: test
+        artifacts: false
+      - job: build
+        artifacts: false
+      - job: prepare-mediawiki
+        artifacts: false
+    artifacts:
+      expire_in: 2 weeks
+      paths:
+        - integration-plan.json
+    script:
+      - python3 -c 'import os, pathlib; pathlib.Path("integration-plan.json").write_text(os.environ["INTEGRATION_TEST_PLAN"])'
+      - python3 /opt/mwcli-wait/wait-github.py dispatch
+
+# A small normal job waits on the Cloud VPS pool; no manual action is required.
+integration-github:
+    image: python:3.13-alpine
+    tags: [mwcli-wait]
+    stage: integration
+    timeout: 45m
+    variables:
+      GIT_STRATEGY: none
+    cache: []
+    dependencies: []
+    rules:
+      - if: '$CI_PROJECT_ID == "16" && ($CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG)'
+    needs:
+      - job: integration-github-request
+        artifacts: false
+    script:
+      - python3 /opt/mwcli-wait/wait-github.py
+
+ci-bridge-checks:
+    extends: .commit-job
+    image: python:3.13-bookworm
+    tags: [wmcs]
+    stage: test
+    cache: []
+    script:
+      - python3 -m unittest discover -s tools/ci -p 'test_*.py'
+      - python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+
+build-release:
+    extends: .go-job
+    rules:
+      - if: '$CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    stage: release
+    needs: [*merged-source-need,checks,test,build]
+    # Exposed so that non-tag pipelines can be used to hand out per-OS/arch builds for testing
+    artifacts:
+      expire_in: 2 weeks
+      paths:
+        - _release/
+    script:
+      - make release VERSION=${CI_COMMIT_TAG:-${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:-$CI_COMMIT_BRANCH}}
+
+# Use the same pinned documentation tools locally and in release jobs.
+.docs-tools:
+    before_script: &setup-docs-tools
+      - curl -fsSL https://mise.run -o /tmp/install-mise.sh
+      - MISE_VERSION=2026.10.12 sh /tmp/install-mise.sh
+      - export PATH="$HOME/.local/bin:$PATH"
+      - mise trust mise.toml
+      - mise install
+
+build-docs:
+    extends: .go-job
+    rules:
+      - if: '$CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    stage: release
+    needs:
+      - *merged-source-need
+      - build
+      - integration-cli
+      - integration-get-code
+      - job: integration-github
+        optional: true
+    before_script:
+      - *checkout-merged-source
+      - *setup-docs-tools
+    script:
+      - mise exec -- go test ./tools/docs-gen
+      - make docs
+    artifacts:
+      paths: [_docs/]
+
+release-build:
+    extends: .go-job
+    rules:
+      - if: '$CI_COMMIT_TAG'
+    stage: release
+    needs:
+      - *merged-source-need
+      - build
+      - integration-cli
+      - integration-get-code
+      - job: integration-github
+        optional: true
+    artifacts:
+      paths:
+        - _release/
+    script:
+      - make release VERSION=${CI_COMMIT_TAG:-$CI_COMMIT_BRANCH}
+
+release-upload:
+  interruptible: false
+  rules:
+    - if: '$CI_COMMIT_TAG'
+  stage: release
+  needs: [release-build]
+  dependencies:
+    - release-build
+  image: ubuntu:latest
+  tags:
+  - wmcs
+  before_script:
+    - apt update
+    - apt -y install curl
+  # https://docs.gitlab.com/ee/user/packages/generic_packages/#publish-a-generic-package-by-using-cicd
+  script:
+    - echo "Placeholder job, as a conditional upload currently happens as part of release-build awaiting decision on https://phabricator.wikimedia.org/T292372"
+    - >
+      for release_path in  $(find ./_release -type f); do
+        release_file=$(echo $release_path | sed "s/.*\///")
+        curl --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file ${release_path} "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/mwcli/${CI_COMMIT_TAG}/${release_file}"
+      done
+
+release-publish:
+  interruptible: false
+  rules:
+    - if: '$CI_COMMIT_TAG'
+  stage: release
+  needs: [release-upload,release-build]
+  dependencies:
+    - release-build
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  tags:
+  - wmcs
+  script:
+    - (echo "## ${CI_COMMIT_TAG}" && echo "CHANGELOG extracted from https://gitlab.wikimedia.org/repos/releng/cli/-/blob/main/CHANGELOG.md" && sed "/^## ${CI_COMMIT_TAG}$/,/^## /"'!d'";//d;/\^$/d" CHANGELOG.md) > .gitlab.description.md
+    - assets_links=""
+    - >
+      for release_path in  $(find ./_release -type f); do
+        release_file=$(echo $release_path | sed "s/.*\///")
+        asset_url="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/mwcli/${CI_COMMIT_TAG}/${release_file}"
+        assets_links="${assets_links} --assets-link {\"name\":\"${release_file}\",\"url\":\"${asset_url}\",\"direct_asset_path\":\"/binaries/${release_file}\"}"
+        case "$release_file" in
+          wm_*)
+            legacy_name="mw_${release_file#wm_}"
+            canonical_url="${CI_PROJECT_URL}/-/releases/${CI_COMMIT_TAG}/downloads/binaries/${release_file}"
+            assets_links="${assets_links} --assets-link {\"name\":\"${legacy_name}\",\"url\":\"${canonical_url}\",\"direct_asset_path\":\"/binaries/${legacy_name}\"}"
+            ;;
+        esac
+      done
+    - release-cli create --name "Release $CI_COMMIT_TAG" --description ".gitlab.description.md" --released-at "${CI_COMMIT_TIMESTAMP}" ${assets_links}
+
+release-docs:
+    interruptible: false
+    rules:
+      - if: '$CI_COMMIT_TAG'
+    stage: release
+    needs: [release-publish]
+    cache: {}
+    image: golang:1.26.1
+    tags:
+    - wmcs
+    before_script:
+      - *setup-docs-tools
+    script:
+      - make VERSION="$CI_COMMIT_TAG" docs-publish
+    artifacts:
+      when: always
+      paths: [_docs/]
