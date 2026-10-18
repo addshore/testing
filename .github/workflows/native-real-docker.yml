@@ -1,0 +1,77 @@
+name: Native real Docker trial
+on:
+  push:
+    branches: [test/native-real-docker]
+    paths: [source/**, .github/workflows/native-real-docker.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: source/go.mod
+          cache-dependency-path: source/go.sum
+      - name: Start real Windows Docker engine and run a container
+        shell: pwsh
+        run: |
+          Get-Service docker
+          Start-Service docker
+          docker version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          docker info --format '{{.OSType}}'
+          docker run --rm --isolation=process mcr.microsoft.com/windows/nanoserver:ltsc2025 cmd /c echo MWCLI_REAL_DOCKER
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build native CLI and use real Docker context
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          go build -o bin/mw.exe .
+          export MWCLI_CONTEXT_TEST=1
+          docker context create mwcli-real --docker host=npipe:////./pipe/docker_engine
+          docker context use mwcli-real
+          ./bin/mw.exe --no-interaction dev --context=real-docker-check where
+          bash tests/check-platform.sh
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: source/go.mod
+          cache-dependency-path: source/go.sum
+      - name: Start real Linux Docker using software emulation
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install colima docker docker-compose qemu
+          mkdir -p ~/.docker/cli-plugins
+          ln -s "$(brew --prefix)/opt/docker-compose/bin/docker-compose" ~/.docker/cli-plugins/docker-compose
+          colima start --vm-type qemu --arch x86_64 --cpu 2 --memory 2 --disk 10 --mount-type 9p
+          docker version
+          docker run --rm alpine:3.22 echo MWCLI_REAL_DOCKER
+      - name: Build native CLI and use real Docker context
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          go build -o bin/mw .
+          export MWCLI_CONTEXT_TEST=1
+          ./bin/mw --no-interaction dev --context=real-docker-check where
+          bash tests/check-platform.sh
+      - name: Colima diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          colima status || true
+          find ~/.colima -name '*stderr.log' -exec tail -80 {} \; || true
