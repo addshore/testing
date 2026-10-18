@@ -1,0 +1,37 @@
+name: Native Windows update validation
+on:
+  push:
+    branches: [codex/windows-update-smoke]
+    paths:
+      - source/**
+      - .github/workflows/windows-update-validation.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-update:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: source/go.mod
+          cache-dependency-path: source/go.sum
+      - name: Run the production helper and native update test
+        shell: bash
+        working-directory: source
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+          sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          Path('../inputs').mkdir(exist_ok=True)
+          Path('../inputs/plan.json').write_text(json.dumps({
+              'tested_sha': sha, 'pipeline_id': 238805, 'request_id': 1002205,
+          }))
+          PY
+          python3 tools/ci/run-github-integration.py windows-update
