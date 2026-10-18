@@ -51,6 +51,11 @@ jobs:
         env:
           TEST: ${{ inputs.test }}
         run: python3 tools/ci/run-github-integration.py "$TEST"
+      - name: Inject a trial-only failure after the real test
+        if: vars.GITLAB_TRIAL_FAIL_TEST == inputs.test
+        run: |
+          echo "Deliberate trial failure: verify GitLab blocks and supports a failed-job rerun."
+          exit 1
 
   report:
     name: Report result

@@ -46,3 +46,9 @@ to this repository and Actions read/write. Use this custom request body:
 Keep the existing production webhook and runners unchanged. Disable the trial
 webhook and `GITLAB_NATIVE_ENABLED`, revoke the temporary token and remove or
 replace its GitLab bot ID when the trial finishes.
+
+For a controlled failure/retry test, set the Actions repository variable
+`GITLAB_TRIAL_FAIL_TEST` to `mysql-cycle` before dispatching. The workflow will
+run the real test, then deliberately fail that native job. Verify the GitLab
+status and gate fail, delete the variable, and use Re-run failed jobs in GitHub.
+This injection exists only in this testing repository's reusable workflow.
