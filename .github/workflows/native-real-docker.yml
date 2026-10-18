@@ -8,6 +8,7 @@ permissions:
   contents: read
 jobs:
   windows:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-2025
     timeout-minutes: 25
     steps:
@@ -54,7 +55,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          brew install colima docker docker-compose qemu
+          brew install colima docker docker-compose qemu lima-additional-guestagents
           mkdir -p ~/.docker/cli-plugins
           ln -s "$(brew --prefix)/opt/docker-compose/bin/docker-compose" ~/.docker/cli-plugins/docker-compose
           colima start --vm-type qemu --arch x86_64 --cpu 2 --memory 2 --disk 10 --mount-type 9p
